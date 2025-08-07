@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: hackrx-api
+    env: python
+    plan: free
+    branch: master
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: AUTHORIZED_TOKEN
+        value: d742ec2aaf3cd69400711966ec8db56a156c9f0404f7cce41808e3c6e9ede8c8
