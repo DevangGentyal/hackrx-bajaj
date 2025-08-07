@@ -3,19 +3,31 @@ import requests
 from uuid import uuid4
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+from typing import List
 from pinecone import Pinecone, ServerlessSpec
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import itertools
 
-# Load .env variables
+# Load environment variables
 load_dotenv()
-api_key = os.getenv("PINECONE_API_KEY")
-env = os.getenv("PINECONE_ENVIRONMENT")  # e.g. "us-west1"
-index_name = os.getenv("PINECONE_INDEX_NAME")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_ENV = os.getenv("PINECONE_ENVIRONMENT")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 
-# Init Pinecone
-pc = Pinecone(api_key=api_key)
+# Initialize Pinecone client
+pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# Download + extract text from PDF
-def extract_text_from_pdf(url):
+# Batch helper
+def batch(iterable, n=96):
+    it = iter(iterable)
+    while True:
+        chunk = list(itertools.islice(it, n))
+        if not chunk:
+            break
+        yield chunk
+
+# Step 1: Download and extract text from PDF
+def extract_text_from_pdf(url: str) -> str:
     response = requests.get(url)
     with open("temp.pdf", "wb") as f:
         f.write(response.content)
@@ -25,8 +37,8 @@ def extract_text_from_pdf(url):
     os.remove("temp.pdf")
     return text
 
-# Token-safe chunking
-def split_text(text, max_tokens=400):
+# Step 2: Token-safe chunking
+def split_text(text: str, max_tokens=400) -> List[str]:
     import tiktoken
     enc = tiktoken.get_encoding("cl100k_base")
     words = text.split()
@@ -42,69 +54,52 @@ def split_text(text, max_tokens=400):
         chunks.append(" ".join(chunk))
     return chunks
 
-import itertools
-from pinecone import Pinecone, ServerlessSpec
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# Batch helper: yields batches of size n
-def batch(iterable, n=96):
-    it = iter(iterable)
-    while True:
-        chunk = list(itertools.islice(it, n))
-        if not chunk:
-            break
-        yield chunk
-
-# ✅ Upsert to Pinecone with async_req=True using thread pool
-def upsert_to_pinecone(chunks):
-    # print("Upserting to Pinecone (parallel)...")
-
-    # Create index if it doesn’t exist
-    if index_name not in pc.list_indexes().names():
-        # print("Creating index...")
+# Step 3: Upsert to Pinecone (NO embeddings — just raw text with metadata)
+def upsert_to_pinecone(chunks: List[str], namespace: str):
+    # Create index if not exists
+    if PINECONE_INDEX_NAME not in pc.list_indexes().names():
         pc.create_index(
-            name=index_name,
-            dimension=2048,
+            name=PINECONE_INDEX_NAME,
+            dimension=1536,  # If using OpenAI/Pinecone-hosted embedding models
             metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region=env),
+            spec=ServerlessSpec(cloud="aws", region=PINECONE_ENV),
         )
 
-    index = pc.Index(index_name)
+    index = pc.Index(PINECONE_INDEX_NAME)
 
-    # Prepare documents
-    docs = [{
-        "_id": str(uuid4()),
-        "text": chunk
+    # Prepare vector records without values (Pinecone will embed server-side)
+    vectors = [{
+        "id": str(uuid4()),
+        "metadata": {"text": chunk}
     } for chunk in chunks]
 
-    # ✅ Start parallel upserts (batch size = 96)
-    async_results = []
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        for i, doc_batch in enumerate(batch(docs, 96)):
-            async_results.append(executor.submit(
-                index.upsert_records, records=doc_batch, namespace="default"
+    # Upsert in batches
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = []
+        for vector_batch in batch(vectors, 96):
+            futures.append(executor.submit(
+                index.upsert,
+                vectors=vector_batch,
+                namespace=namespace
             ))
+        for future in as_completed(futures):
+            future.result()
 
-        # Wait and collect results
-        for i, future in enumerate(as_completed(async_results)):
-            try:
-                future.result()
-                # print(f"✅ Batch {i+1} upserted.")
-            except Exception as e:
-                break
+# Main function to process and ingest
+def process_and_ingest(pdf_url: str) -> str:
+    namespace = str(uuid4())[:8]  # Generate unique namespace per request
 
-    # print("✅ All batches done.")
-
-# Ingest full PDF to Pinecone
-def process_and_ingest(pdf_url):
+    # Step 1: Parse and chunk
     text = extract_text_from_pdf(pdf_url)
     chunks = split_text(text)
-    upsert_to_pinecone(chunks)
 
-# Entry point
+    # Step 2: Store in Pinecone
+    upsert_to_pinecone(chunks, namespace)
+
+    return namespace
+
+# Local test
 if __name__ == "__main__":
-    input_json = {
-        "documents": "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D",
-        
-    }
-    process_and_ingest(input_json["documents"])
+    url = "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"
+    ns = process_and_ingest(url)
+    print(f"✅ Data ingested under namespace: {ns}")

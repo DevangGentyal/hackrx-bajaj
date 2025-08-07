@@ -11,14 +11,13 @@ pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
 # Load index host and name
 INDEX_HOST = os.getenv("PINECONE_INDEX_HOST")  # example: 'my-index-xxxxxx.svc.us-east1-gcp.pinecone.io'
-INDEX_NAMESPACE = "default"
 
 # Connect to index
 index = pc.Index(host=INDEX_HOST)
 # print(index.describe_index_stats())
 
 
-def search_with_text(questions: List[str], top_k: int = 3) -> List[Dict]:
+def search_with_text(questions: List[str], nampespace, top_k: int = 3) -> List[Dict]:
     """
     Perform semantic search and return a list of dicts:
     {
@@ -32,7 +31,7 @@ def search_with_text(questions: List[str], top_k: int = 3) -> List[Dict]:
         # print(f"\n🔍 Querying: {question}")
 
         result = index.search(
-            namespace=INDEX_NAMESPACE,
+            namespace=nampespace,
             query={
                 "inputs": {"text": question},
                 "top_k": top_k
@@ -64,5 +63,5 @@ if __name__ == "__main__":
     ]
 
     output = search_with_text(questions)
-    # print("\n🧾 Final JSON Output:")
-    # print(json.dumps(output, indent=2))
+    print("\n🧾 Final JSON Output:")
+    print(json.dumps(output, indent=2))

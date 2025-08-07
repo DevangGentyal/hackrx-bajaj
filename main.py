@@ -38,10 +38,10 @@ def run_pipeline(
 
     try:
         # Step 1: Ingest document
-        process_and_ingest(input.documents)
+        namespace = process_and_ingest(input.documents)
 
         # Step 2: Semantic search
-        search_output = search_with_text(input.questions)
+        search_output = search_with_text(input.questions,namespace)
         # print("--------------S:----------\n",search_output)
 
         # Step 3: Generate flat answers only
