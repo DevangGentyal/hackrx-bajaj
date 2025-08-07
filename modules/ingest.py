@@ -3,31 +3,19 @@ import requests
 from uuid import uuid4
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
-from typing import List
 from pinecone import Pinecone, ServerlessSpec
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import itertools
 
-# Load environment variables
+# Load .env variables
 load_dotenv()
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENVIRONMENT")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
+api_key = os.getenv("PINECONE_API_KEY")
+env = os.getenv("PINECONE_ENVIRONMENT")  # e.g. "us-west1"
+index_name = os.getenv("PINECONE_INDEX_NAME")
 
-# Initialize Pinecone client
-pc = Pinecone(api_key=PINECONE_API_KEY)
+# Init Pinecone
+pc = Pinecone(api_key=api_key)
 
-# Batch helper
-def batch(iterable, n=96):
-    it = iter(iterable)
-    while True:
-        chunk = list(itertools.islice(it, n))
-        if not chunk:
-            break
-        yield chunk
-
-# Step 1: Download and extract text from PDF
-def extract_text_from_pdf(url: str) -> str:
+# Download + extract text from PDF
+def extract_text_from_pdf(url):
     response = requests.get(url)
     with open("temp.pdf", "wb") as f:
         f.write(response.content)
@@ -37,8 +25,8 @@ def extract_text_from_pdf(url: str) -> str:
     os.remove("temp.pdf")
     return text
 
-# Step 2: Token-safe chunking
-def split_text(text: str, max_tokens=400) -> List[str]:
+# Token-safe chunking
+def split_text(text, max_tokens=400):
     import tiktoken
     enc = tiktoken.get_encoding("cl100k_base")
     words = text.split()
@@ -54,52 +42,61 @@ def split_text(text: str, max_tokens=400) -> List[str]:
         chunks.append(" ".join(chunk))
     return chunks
 
-# Step 3: Upsert to Pinecone (NO embeddings — just raw text with metadata)
-def upsert_to_pinecone(chunks: List[str], namespace: str):
-    # Create index if not exists
-    if PINECONE_INDEX_NAME not in pc.list_indexes().names():
+import itertools
+from pinecone import Pinecone, ServerlessSpec
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Batch helper: yields batches of size n
+def batch(iterable, n=96):
+    it = iter(iterable)
+    while True:
+        chunk = list(itertools.islice(it, n))
+        if not chunk:
+            break
+        yield chunk
+
+# ✅ Upsert to Pinecone with async_req=True using thread pool
+def upsert_to_pinecone(chunks, namespace):
+    if index_name not in pc.list_indexes().names():
         pc.create_index(
-            name=PINECONE_INDEX_NAME,
-            dimension=1536,  # If using OpenAI/Pinecone-hosted embedding models
+            name=index_name,
+            dimension=2048,
             metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region=PINECONE_ENV),
+            spec=ServerlessSpec(cloud="aws", region=env),
         )
 
-    index = pc.Index(PINECONE_INDEX_NAME)
+    index = pc.Index(index_name)
 
-    # Prepare vector records without values (Pinecone will embed server-side)
-    vectors = [{
-        "id": str(uuid4()),
-        "metadata": {"text": chunk}
+    docs = [{
+        "_id": str(uuid4()),
+        "text": chunk
     } for chunk in chunks]
 
-    # Upsert in batches
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = []
-        for vector_batch in batch(vectors, 96):
-            futures.append(executor.submit(
-                index.upsert,
-                vectors=vector_batch,
-                namespace=namespace
+    async_results = []
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        for i, doc_batch in enumerate(batch(docs, 96)):
+            async_results.append(executor.submit(
+                index.upsert_records, records=doc_batch, namespace=namespace
             ))
-        for future in as_completed(futures):
-            future.result()
 
-# Main function to process and ingest
-def process_and_ingest(pdf_url: str) -> str:
-    namespace = str(uuid4())[:8]  # Generate unique namespace per request
+        for i, future in enumerate(as_completed(async_results)):
+            try:
+                future.result()
+            except Exception as e:
+                break
 
-    # Step 1: Parse and chunk
+# Ingest full PDF to Pinecone
+def process_and_ingest(pdf_url):
+    namespace = str(uuid4())  # Generate unique namespace
     text = extract_text_from_pdf(pdf_url)
     chunks = split_text(text)
-
-    # Step 2: Store in Pinecone
     upsert_to_pinecone(chunks, namespace)
-
     return namespace
 
-# Local test
+# Entry point
 if __name__ == "__main__":
-    url = "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"
-    ns = process_and_ingest(url)
-    print(f"✅ Data ingested under namespace: {ns}")
+    input_json = {
+        "documents": "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D",
+    }
+    namespace_used = process_and_ingest(input_json["documents"])
+    print("✅ Data inserted in namespace:", namespace_used)

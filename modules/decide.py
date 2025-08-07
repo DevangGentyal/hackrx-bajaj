@@ -2,6 +2,8 @@ import os
 import requests
 from dotenv import load_dotenv
 import json
+import time
+import random
 
 load_dotenv()
 
@@ -27,13 +29,60 @@ You are a decision assistant that answers questions using only the provided clau
 6. Do not add assumptions, background, or filler phrases.
 7. Always include exceptions or special conditions if mentioned.
 8. Never use vague terms like "as per clause 2" — instead, quote the clause title or reference exactly as given.
-9. Never use special characters unless needed. Also no styling for content as bold, *, italics or something
+9. Never use special characters, formatting, bold, italics, asterisks, or styling - plain text only.
+10. Keep the answer concise but complete.
 
 ### FORMAT:
 One concise line that clearly follows:  
 Decision + Explanation + Clause Proof
 
 """
+
+def make_groq_request(payload, max_retries=3, base_delay=1):
+    """
+    Make a request to Groq API with retry logic and rate limiting
+    """
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    for attempt in range(max_retries):
+        try:
+            # Add small random delay to avoid hitting rate limits
+            if attempt > 0:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"   Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            
+            response = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+            
+            # Handle different HTTP errors
+            if response.status_code == 429:  # Rate limit
+                print(f"   Rate limited. Waiting...")
+                time.sleep(5)
+                continue
+            elif response.status_code == 401:  # Auth error
+                return {"error": "API key authentication failed"}
+            elif response.status_code >= 500:  # Server error
+                print(f"   Server error {response.status_code}. Retrying...")
+                continue
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.Timeout:
+            print(f"   Request timeout (attempt {attempt + 1})")
+            continue
+        except requests.exceptions.ConnectionError:
+            print(f"   Connection error (attempt {attempt + 1})")
+            continue
+        except requests.exceptions.RequestException as e:
+            print(f"   Request error (attempt {attempt + 1}): {str(e)}")
+            continue
+        except Exception as e:
+            print(f"   Unexpected error (attempt {attempt + 1}): {str(e)}")
+            continue
+    
+    return {"error": f"Failed after {max_retries} attempts"}
+
 
 def get_document_answers(qa_pairs):
     """
@@ -45,33 +94,34 @@ def get_document_answers(qa_pairs):
     Returns:
         dict: Dictionary with 'answers' key containing list of answer strings
     """
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    
     answers = []
+    total_questions = len(qa_pairs)
+    
+    print(f"Processing {total_questions} questions...")
 
-    for item in qa_pairs:
+    for i, item in enumerate(qa_pairs, 1):
         question = item["question"]
         clauses = item["related_clauses"]
+        
+        print(f"\n[{i}/{total_questions}] Processing: {question[:80]}...")
 
         # Check if all clauses are empty or placeholder
         if not clauses or all(clause.strip() in ["", "<no text>"] for clause in clauses):
+            print("   No relevant clauses found")
             answers.append("Answer could not be generated due to lack of relevant document information.")
             continue
 
-        # Build prompt
+        # Build prompt - more concise to avoid token limits
+        clauses_text = "\n".join(f"- {clause[:500]}..." if len(clause) > 500 else f"- {clause}" 
+                                 for clause in clauses[:3])  # Limit to top 3 clauses
+        
         user_prompt = f"""
 QUESTION: {question}
 
-RELEVANT DOCUMENT CLAUSES:
-{chr(10).join(f"• {clause}" for clause in clauses)}
+RELEVANT CLAUSES:
+{clauses_text}
 
-TASK: Based only on the clauses above, write a 1-line answer that:
-- Clearly follows this structure: Decision + Explanation + Clause Proof
-- Includes all important numbers, conditions, and limitations
-- Uses terms and titles exactly as written in the clauses
-- Avoids any extra formatting or background
-
-Return only the one-line answer.
+Generate a single sentence answer that includes the decision, explanation, and clause proof. Use plain text only - no formatting, bold, or special characters.
 """
 
         payload = {
@@ -80,39 +130,48 @@ Return only the one-line answer.
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.2,
-            "max_tokens": 500,
+            "temperature": 0.1,  # Lower temperature for more consistent answers
+            "max_tokens": 200,   # Shorter responses
             "top_p": 0.9
         }
 
-        try:
-            response = requests.post(url, headers=HEADERS, json=payload)
-            response.raise_for_status()
-            result = response.json()
+        # Add small delay between requests to avoid rate limiting
+        if i > 1:
+            time.sleep(0.5)
 
-            if "choices" not in result or not result["choices"]:
-                # print(f"❌ No valid response for question: {question}")
-                answers.append("Answer could not be generated due to API response issues.")
-                continue
+        result = make_groq_request(payload)
 
-            content = result["choices"][0]["message"]["content"].strip()
+        if "error" in result:
+            print(f"   Failed: {result['error']}")
+            answers.append(f"Answer could not be generated: {result['error']}")
+            continue
 
-            # Clean up
-            content = content.replace('"', '').strip()
-            if content.lower().startswith("answer:"):
-                content = content[7:].strip()
+        if "choices" not in result or not result["choices"]:
+            print("   No valid response")
+            answers.append("Answer could not be generated due to API response issues.")
+            continue
 
-            if not content:
-                content = "Answer could not be generated due to insufficient document context."
+        content = result["choices"][0]["message"]["content"].strip()
 
-            answers.append(content)
+        # Clean up response
+        content = content.replace('"', '').strip()
+        
+        # Remove common prefixes
+        prefixes_to_remove = ["answer:", "response:", "decision:", "the answer is:"]
+        for prefix in prefixes_to_remove:
+            if content.lower().startswith(prefix):
+                content = content[len(prefix):].strip()
+        
+        # Remove formatting characters
+        formatting_chars = ["**", "*", "_", "##", "#"]
+        for char in formatting_chars:
+            content = content.replace(char, "")
 
-        except requests.exceptions.RequestException as e:
-            # print(f"❌ Request error for question '{question}': {e}")
-            answers.append("Answer could not be generated due to connection error.")
-        except Exception as e:
-            # print(f"❌ Unexpected error for question '{question}': {e}")
-            answers.append("Answer could not be generated due to an unexpected error.")
+        if not content:
+            content = "Answer could not be generated due to insufficient document context."
+
+        print(f"   Success: {content[:100]}...")
+        answers.append(content)
 
     return {
         "answers": answers
@@ -141,10 +200,10 @@ if __name__ == "__main__":
         },
     ]
 
-    # print("🔄 Processing questions...")
+    print("🔄 Processing questions...")
     result = get_document_answers(example_data)
 
-    # print("\n📋 Final Output:")
+    print("\n📋 Final Output:")
     print(json.dumps(result, indent=2, ensure_ascii=False))
     
-    # print(f"\n✅ Successfully processed {len(result['answers'])} questions")
+    print(f"\n✅ Successfully processed {len(result['answers'])} questions")
