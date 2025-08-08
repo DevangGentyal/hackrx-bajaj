@@ -34,7 +34,8 @@ async def run_lightning_pipeline(
         print(f"⚡ Lightning pipeline: {len(input.questions)} questions")
         
         # Step 1: Lightning ingestion
-        namespace = process_and_ingest(input.documents)
+        result = process_and_ingest(input.documents)
+        namespace = result["namespace"]
         ingest_time = time.time() - start_time
         print(f"⚡ Ingestion: {ingest_time:.1f}s")
 
