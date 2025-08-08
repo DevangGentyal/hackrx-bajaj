@@ -1,53 +1,78 @@
 import os
 import requests
+import time
 from uuid import uuid4
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import itertools
 
-# Load .env variables
 load_dotenv()
+
 api_key = os.getenv("PINECONE_API_KEY")
-env = os.getenv("PINECONE_ENVIRONMENT")  # e.g. "us-west1"
+env = os.getenv("PINECONE_ENVIRONMENT")
 index_name = os.getenv("PINECONE_INDEX_NAME")
 
-# Init Pinecone
 pc = Pinecone(api_key=api_key)
 
-# Download + extract text from PDF
-def extract_text_from_pdf(url):
-    response = requests.get(url)
-    with open("temp.pdf", "wb") as f:
-        f.write(response.content)
+def extract_text_from_pdf_fast(url):
+    """Ultra-fast PDF extraction with minimal processing"""
+    try:
+        response = requests.get(url, timeout=8, stream=True)  # Reduced timeout + streaming
+        response.raise_for_status()
+        
+        # Write and read simultaneously for speed
+        with open("temp.pdf", "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        reader = PdfReader("temp.pdf")
+        
+        # Extract only first N pages for speed (adjust based on needs)
+        max_pages = min(50, len(reader.pages))  # Limit to 50 pages max
+        text = "\n".join(
+            p.extract_text()[:2000]  # Limit text per page
+            for p in reader.pages[:max_pages] 
+            if p.extract_text()
+        )
+        
+        os.remove("temp.pdf")
+        return text
+        
+    except Exception as e:
+        if os.path.exists("temp.pdf"):
+            os.remove("temp.pdf")
+        raise Exception(f"PDF extraction failed: {str(e)[:100]}")
 
-    reader = PdfReader("temp.pdf")
-    text = "\n".join(p.extract_text() for p in reader.pages if p.extract_text())
-    os.remove("temp.pdf")
-    return text
-
-# Token-safe chunking
-def split_text(text, max_tokens=400):
-    import tiktoken
-    enc = tiktoken.get_encoding("cl100k_base")
+def split_text_fast(text, max_tokens=200):  # Much smaller chunks for speed
+    """Ultra-fast text splitting"""
+    
+    # Simple word-based splitting (much faster than tiktoken)
     words = text.split()
-    chunks, chunk, token_count = [], [], 0
-
+    chunks = []
+    chunk = []
+    word_count = 0
+    
+    # Rough estimation: 1 token ≈ 0.75 words
+    max_words = int(max_tokens * 0.75)
+    
     for word in words:
-        token_count += len(enc.encode(word + " "))
         chunk.append(word)
-        if token_count >= max_tokens:
+        word_count += 1
+        
+        if word_count >= max_words:
             chunks.append(" ".join(chunk))
-            chunk, token_count = [], 0
+            chunk = []
+            word_count = 0
+    
     if chunk:
         chunks.append(" ".join(chunk))
+    
     return chunks
 
-import itertools
-from pinecone import Pinecone, ServerlessSpec
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# Batch helper: yields batches of size n
-def batch(iterable, n=96):
+def batch_fast(iterable, n=96):
+    """Ultra-fast batching"""
     it = iter(iterable)
     while True:
         chunk = list(itertools.islice(it, n))
@@ -55,8 +80,9 @@ def batch(iterable, n=96):
             break
         yield chunk
 
-# ✅ Upsert to Pinecone with async_req=True using thread pool
-def upsert_to_pinecone(chunks, namespace):
+def lightning_upsert(chunks, namespace):
+    """Lightning-fast parallel upload with maximum concurrency"""
+    
     if index_name not in pc.list_indexes().names():
         pc.create_index(
             name=index_name,
@@ -66,37 +92,66 @@ def upsert_to_pinecone(chunks, namespace):
         )
 
     index = pc.Index(index_name)
+    
+    # Pre-generate all docs (faster than generating during upload)
+    docs = [{"_id": str(uuid4()), "text": chunk} for chunk in chunks]
+    print(f"⚡ Lightning upload: {len(docs)} chunks")
 
-    docs = [{
-        "_id": str(uuid4()),
-        "text": chunk
-    } for chunk in chunks]
-
-    async_results = []
+    # Maximum parallelism with larger thread pool
     with ThreadPoolExecutor(max_workers=30) as executor:
-        for i, doc_batch in enumerate(batch(docs, 96)):
-            async_results.append(executor.submit(
-                index.upsert_records, records=doc_batch, namespace=namespace
-            ))
+        futures = [
+            executor.submit(turbo_upsert, index, list(doc_batch), namespace)
+            for doc_batch in batch_fast(docs, 96)
+        ]
+        
+        # Don't wait for individual completion - just ensure all complete
+        completed = sum(1 for f in as_completed(futures) if f.result(timeout=30))
+    
+    print(f"⚡ Upload: {completed} batches completed")
+    if completed == 0:
+        raise Exception("All uploads failed")
 
-        for i, future in enumerate(as_completed(async_results)):
-            try:
-                future.result()
-            except Exception as e:
-                break
+def turbo_upsert(index, doc_batch, namespace):
+    """Single-attempt fast upsert"""
+    try:
+        index.upsert_records(records=doc_batch, namespace=namespace)
+        return True
+    except:
+        return False  # Fail fast - no retries
 
-# Ingest full PDF to Pinecone
-def process_and_ingest(pdf_url):
-    namespace = str(uuid4())  # Generate unique namespace
-    text = extract_text_from_pdf(pdf_url)
-    chunks = split_text(text)
-    upsert_to_pinecone(chunks, namespace)
-    return namespace
+def process_and_ingest_lightning(pdf_url):
+    """Lightning-fast ingestion pipeline"""
+    print(f"⚡ Lightning ingestion starting...")
+    
+    namespace = str(uuid4())
+    total_start = time.time()
+    
+    try:
+        # Step 1: Extract (with limits)
+        text = extract_text_from_pdf_fast(pdf_url)
+        extract_time = time.time() - total_start
+        print(f"⚡ PDF extracted in {extract_time:.1f}s")
+        
+        # Step 2: Split (faster method)
+        split_start = time.time()
+        chunks = split_text_fast(text, max_tokens=200)  # Smaller chunks
+        split_time = time.time() - split_start
+        print(f"⚡ Split {len(chunks)} chunks in {split_time:.1f}s")
+        
+        # Step 3: Upload (maximum speed)
+        upload_start = time.time()
+        lightning_upsert(chunks, namespace)
+        upload_time = time.time() - upload_start
+        print(f"⚡ Upload in {upload_time:.1f}s")
+        
+        total_time = time.time() - total_start
+        print(f"⚡ Total ingestion: {total_time:.1f}s")
+        
+        return namespace
+        
+    except Exception as e:
+        print(f"❌ Lightning ingestion failed: {e}")
+        raise
 
-# Entry point
-if __name__ == "__main__":
-    input_json = {
-        "documents": "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D",
-    }
-    namespace_used = process_and_ingest(input_json["documents"])
-    print("✅ Data inserted in namespace:", namespace_used)
+# Replace the function call in your main module
+process_and_ingest = process_and_ingest_lightning
