@@ -70,6 +70,7 @@ def get_document_answers(qa_pairs):
     "IMPORTANT: You must merge these three parts into a single, flowing human-like sentence or paragraph.\n"
     "You MUST NOT include any labels, headings, or prefixes such as 'Decision:', 'Explanation:', or 'Backing:' in your final output.\n"
     "If you include any of these labels, the answer is considered WRONG.\n"
+    "If the ans are too short (1-2 words) make it aleast a single sentence"
 )
 
 
