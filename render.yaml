@@ -9,3 +9,9 @@ services:
     envVars:
       - key: AUTHORIZED_TOKEN
         value: d742ec2aaf3cd69400711966ec8db56a156c9f0404f7cce41808e3c6e9ede8c8
+      - key: HF_HUB_DISABLE_SYMLINKS_WARNING
+        value: "1"
+      - key: TF_ENABLE_ONEDNN_OPTS
+        value: "0"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
