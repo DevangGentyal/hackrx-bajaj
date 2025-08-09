@@ -29,6 +29,7 @@ async def run_lightning_pipeline(
         raise HTTPException(status_code=401, detail="Invalid authorization")
 
     start_time = time.time()
+    print("Recived Request")
     
     try:
         print(f"⚡ Lightning pipeline: {len(input.questions)} questions")

@@ -31,6 +31,7 @@ def get_document_answers(qa_pairs):
     for i, item in enumerate(qa_pairs, 1):
         question = item["question"]
         clauses = item.get("related_clauses", [])
+        print("Questions: ",question,"\n",clauses)
         context = "\n".join(clauses[:3]) if clauses else "No relevant clauses available."
         prompt_blocks.append(f"{i}. Question: {question}\nContext:\n{context}")
 
@@ -38,7 +39,7 @@ def get_document_answers(qa_pairs):
 
     instructions = (
         "You are a legal assistant. For each question below, use only the provided clause context to answer.\n"
-        "Do NOT use prior knowledge or make assumptions. If not answerable from context, reply: 'Not mentioned in context.'\n"
+        "Do NOT use prior knowledge or make assumptions.\n"
         "Give your answers in this exact format:\n1. <answer>\n2. <answer>\n...\n"
     )
 
