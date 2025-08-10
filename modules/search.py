@@ -81,7 +81,7 @@ def lightning_search(questions: List[str], ns: str) -> List[Dict]:
     print("✅ Lightning search completed successfully")
     index.delete(delete_all=True, namespace=ns)
     print("🧹 Namespace cleared from index")
-    print(final_output)
+    # print(final_output)
     return final_output
 
 # Replace the function
