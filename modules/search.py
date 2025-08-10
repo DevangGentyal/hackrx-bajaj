@@ -4,7 +4,6 @@ import os
 import time
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -12,16 +11,10 @@ pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 INDEX_HOST = os.getenv("PINECONE_INDEX_HOST")
 index = pc.Index(host=INDEX_HOST)
 
-model = None
-def get_model():
-    global model
-    if model is None:
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-    return model
-
 def lightning_search(questions: List[str], ns: str) -> List[Dict]:
     """
-    Optimized semantic clause search using local embeddings for best accuracy.
+    Optimized semantic clause search with reliable namespace check,
+    improved result filtering, and field-level clause fallback.
     """
     # Quick validation for namespace readiness
     for attempt in range(3):
@@ -46,29 +39,19 @@ def lightning_search(questions: List[str], ns: str) -> List[Dict]:
     def search_single_question(question_data):
         idx, question = question_data
         try:
-            # Embed the query locally
-            embed_model = get_model()
-            query_embedding = embed_model.encode(question).tolist()
-
-            # Search in Pinecone using the vector
-            result = index.query(
+            result = index.search(
                 namespace=ns,
-                vector=query_embedding,
-                top_k=5,
-                include_metadata=True
+                query={"inputs": {"text": question}, "top_k": 5}  # Top-5 for broader match
             )
-
-            hits = result.get("matches", [])
+            hits = result.get("result", {}).get("hits", [])
             clauses = []
 
             for hit in hits:
-                text = hit.get("metadata", {}).get("text")
-                # Fallback: any long-enough metadata string
-                if not text:
-                    text = next((v for v in hit.get("metadata", {}).values()
-                                 if isinstance(v, str) and len(v) > 20), None)
+                fields = hit.get("fields", {})
+                # Fallback: get any valid string field with length > 20
+                text = fields.get("text") or next((v for v in fields.values() if isinstance(v, str) and len(v) > 20), None)
                 if text and text not in clauses:
-                    clauses.append(text)
+                    clauses.append(text)  # Truncate to 1000 chars
                 if len(clauses) >= 3:
                     break
 
@@ -86,10 +69,11 @@ def lightning_search(questions: List[str], ns: str) -> List[Dict]:
                 idx, result = future.result()
                 final_output[idx] = result
                 print(f"✅ Q{idx+1}: {len(result['related_clauses'])} clauses found")
+                # print(result["related_clauses"])
             except Exception as e:
                 print(f"⚠️ Search future failed: {e}")
 
-    # Fill missing results
+    # Ensure all results are returned
     for i, result in enumerate(final_output):
         if result is None:
             final_output[i] = {"question": questions[i], "related_clauses": []}
@@ -97,7 +81,7 @@ def lightning_search(questions: List[str], ns: str) -> List[Dict]:
     print("✅ Lightning search completed successfully")
     index.delete(delete_all=True, namespace=ns)
     print("🧹 Namespace cleared from index")
-
+    print(final_output)
     return final_output
 
 # Replace the function
