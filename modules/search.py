@@ -12,8 +12,12 @@ pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 INDEX_HOST = os.getenv("PINECONE_INDEX_HOST")
 index = pc.Index(host=INDEX_HOST)
 
-# Load the same embedding model used during ingestion
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+model = None
+def get_model():
+    global model
+    if model is None:
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+    return model
 
 def lightning_search(questions: List[str], ns: str) -> List[Dict]:
     """
@@ -43,6 +47,7 @@ def lightning_search(questions: List[str], ns: str) -> List[Dict]:
         idx, question = question_data
         try:
             # Embed the query locally
+            embed_model = get_model()
             query_embedding = embed_model.encode(question).tolist()
 
             # Search in Pinecone using the vector

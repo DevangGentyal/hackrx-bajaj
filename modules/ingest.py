@@ -25,7 +25,13 @@ pc = Pinecone(api_key=api_key)
 
 # Load free forever embedding model (fast + accurate)
 # All-MiniLM-L6-v2 is fast (~384 dim), good semantic accuracy
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+model = None
+def get_model():
+    global model
+    if model is None:
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+    return model
+
 
 # ------------------- PDF EXTRACTION -------------------
 def extract_complete_text_from_pdf(url):
@@ -120,6 +126,7 @@ def parallel_upsert_complete(chunks, namespace):
 
     # Embed locally in parallel
     print("🔍 Generating embeddings...")
+    embed_model = get_model()
     embeddings = embed_model.encode(chunks, batch_size=32, show_progress_bar=True)
 
     # Prepare Pinecone records
